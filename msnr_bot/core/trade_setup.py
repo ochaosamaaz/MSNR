@@ -282,6 +282,10 @@ class TradeCalculator:
         if setup.risk_reward_ratio < self.min_rrr:
             return False, f"RRR too low: {setup.risk_reward_ratio} < {self.min_rrr} min"
 
+        # Cap unrealistic RRR (usually means TP is too far / zone mismatch)
+        if setup.risk_reward_ratio > 5.0:
+            return False, f"RRR unrealistic: {setup.risk_reward_ratio} > 5.0 max"
+
         # Check score
         if setup.score_breakdown and setup.score_breakdown.total_score < Config.MIN_SCORE_ALERT:
             return False, f"Score too low: {setup.score_breakdown.total_score} < {Config.MIN_SCORE_ALERT}"
@@ -306,14 +310,29 @@ class TradeCalculator:
             return 5
 
     def filter_valid_setups(self, setups: List[TradeSetup]) -> List[TradeSetup]:
-        """Filter and sort setups by validity and priority."""
+        """Filter, deduplicate, and sort setups. Only BEST per symbol+direction."""
         valid = [s for s in setups if s.is_valid]
+
+        # Deduplicate: keep only the BEST setup per symbol + direction
+        best_setups: dict = {}
+        for s in valid:
+            key = f"{s.symbol}_{s.direction.value}"
+            if key not in best_setups:
+                best_setups[key] = s
+            else:
+                # Keep higher score
+                existing_score = best_setups[key].score_breakdown.total_score if best_setups[key].score_breakdown else 0
+                new_score = s.score_breakdown.total_score if s.score_breakdown else 0
+                if new_score > existing_score:
+                    best_setups[key] = s
+
+        result = list(best_setups.values())
         # Sort by score descending
-        valid.sort(
+        result.sort(
             key=lambda s: s.score_breakdown.total_score if s.score_breakdown else 0,
             reverse=True,
         )
-        return valid
+        return result
 
     def get_sniper_setups(self, setups: List[TradeSetup]) -> List[TradeSetup]:
         """Get only SNIPER setups."""

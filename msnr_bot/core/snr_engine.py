@@ -313,7 +313,7 @@ class SNREngine:
     def detect_zones(self, symbol: str, timeframe: str, df: pd.DataFrame) -> List[SNRZone]:
         """
         Main detection method. Finds all SNR zones for given OHLC data.
-        Returns list of valid (non-expired) zones.
+        Returns list of valid (non-expired) zones, deduplicated.
         """
         if len(df) < 20:
             return []
@@ -389,7 +389,61 @@ class SNREngine:
             zone.last_update = datetime.utcnow()
             zones.append(zone)
 
+        # DEDUPLICATE: Remove zones that are too close to each other
+        zones = self._deduplicate_zones(zones, atr)
+
         return zones
+
+    def _deduplicate_zones(self, zones: List[SNRZone], atr: pd.Series) -> List[SNRZone]:
+        """
+        Remove duplicate zones that overlap or are within 1 ATR of each other.
+        Keeps the zone with the best departure strength and most recent creation.
+        """
+        if not zones or atr.empty:
+            return zones
+
+        current_atr = atr.iloc[-1]
+        if pd.isna(current_atr) or current_atr == 0:
+            return zones
+
+        # Separate by type
+        support_zones = [z for z in zones if z.zone_type == ZoneType.SUPPORT]
+        resistance_zones = [z for z in zones if z.zone_type == ZoneType.RESISTANCE]
+
+        deduped_support = self._dedup_group(support_zones, current_atr)
+        deduped_resistance = self._dedup_group(resistance_zones, current_atr)
+
+        return deduped_support + deduped_resistance
+
+    def _dedup_group(self, zones: List[SNRZone], atr: float) -> List[SNRZone]:
+        """Deduplicate a group of same-type zones."""
+        if not zones:
+            return []
+
+        # Sort by swing price
+        zones.sort(key=lambda z: z.swing_price)
+
+        deduped = []
+        i = 0
+        while i < len(zones):
+            # Collect all zones within 1 ATR of this one
+            cluster = [zones[i]]
+            j = i + 1
+            while j < len(zones) and abs(zones[j].swing_price - zones[i].swing_price) < atr:
+                cluster.append(zones[j])
+                j += 1
+
+            # Keep the BEST zone from the cluster
+            # Priority: strongest departure > most recent
+            best = max(cluster, key=lambda z: (
+                z.departure_distance,  # Strongest departure
+                z.candle_index,        # Most recent
+            ))
+            deduped.append(best)
+
+            i = j
+
+        return deduped
 
     def get_nearest_resistance(
         self, zones: List[SNRZone], current_price: float
