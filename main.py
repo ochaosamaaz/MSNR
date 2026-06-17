@@ -58,8 +58,8 @@ def validate_config():
     logger.info(f"  Timeframes: {Config.TIMEFRAMES}")
 
 
-def main():
-    """Main application entry point."""
+async def async_main():
+    """Async main application entry point."""
     logger.info("=" * 50)
     logger.info("MSNR TELEGRAM TRADING AGENT v1.0.0")
     logger.info("Malaysia SNR Methodology")
@@ -76,27 +76,45 @@ def main():
     # Build the Telegram application
     app = bot.build_application()
 
-    # Set up post-init to start alert system
-    async def post_init(application):
-        """Start alert system after bot is initialized."""
-        if Config.ALERTS_ENABLED and Config.TELEGRAM_CHAT_ID:
-            alert_system.start()
-            logger.info("Automatic alert system started.")
-        else:
-            logger.info("Automatic alerts disabled (no CHAT_ID or alerts disabled).")
+    # Initialize the application
+    await app.initialize()
 
-    async def post_shutdown(application):
-        """Cleanup on shutdown."""
+    # Start alert system
+    if Config.ALERTS_ENABLED and Config.TELEGRAM_CHAT_ID:
+        alert_system.start()
+        logger.info("Automatic alert system started.")
+    else:
+        logger.info("Automatic alerts disabled (no CHAT_ID or alerts disabled).")
+
+    # Start the bot
+    await app.start()
+    logger.info("Starting Telegram bot... (Press Ctrl+C to stop)")
+
+    # Start polling
+    await app.updater.start_polling(drop_pending_updates=True)
+
+    try:
+        # Keep running until interrupted
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Shutting down...")
+    finally:
+        # Cleanup
         alert_system.stop()
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
         await scanner.close()
         logger.info("Bot shutdown complete.")
 
-    app.post_init = post_init
-    app.post_shutdown = post_shutdown
 
-    # Run the bot
-    logger.info("Starting Telegram bot... (Press Ctrl+C to stop)")
-    app.run_polling(drop_pending_updates=True)
+def main():
+    """Entry point - handles event loop for all Python versions."""
+    try:
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
 
 
 if __name__ == "__main__":
