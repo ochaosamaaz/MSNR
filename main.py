@@ -22,13 +22,15 @@ from msnr_bot.modules.scanner import MarketScanner
 from msnr_bot.bot.telegram_bot import MSNRBot
 from msnr_bot.bot.alert_system import AlertSystem
 
-# Configure logging
+# Configure logging - use UTF-8 for Windows compatibility with emojis
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(
+            stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False)
+        ),
         logging.FileHandler("msnr_bot.log", mode="a"),
     ],
 )

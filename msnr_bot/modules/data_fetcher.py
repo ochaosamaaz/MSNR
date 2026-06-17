@@ -62,9 +62,12 @@ class DataFetcher:
         self._last_request_time: Optional[datetime] = None
 
         if not self.api_key:
-            logger.error("⚠️ TWELVEDATA_API_KEY not set! Get free key: https://twelvedata.com")
+            logger.error(
+                "TWELVEDATA_API_KEY not set! Get free key: https://twelvedata.com\n"
+                "Make sure .env file is in the same folder as main.py"
+            )
         else:
-            logger.info(f"✓ TwelveData API ready (daily budget: {DAILY_REQUEST_LIMIT} requests)")
+            logger.info(f"TwelveData API ready (key: {self.api_key[:8]}...) | Budget: {DAILY_REQUEST_LIMIT}/day")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -89,7 +92,7 @@ class DataFetcher:
         if today != self._day_start:
             self._daily_count = 0
             self._day_start = today
-            logger.info("📊 Daily request counter reset.")
+            logger.info("Daily request counter reset.")
 
     def _can_make_request(self) -> bool:
         """Check if we can make another request."""
@@ -131,13 +134,14 @@ class DataFetcher:
 
         # Check budget
         if not self._can_make_request():
-            logger.warning(f"⚠️ Daily limit reached ({DAILY_REQUEST_LIMIT}). Using stale cache or skipping.")
+            logger.warning(f"Daily limit reached ({DAILY_REQUEST_LIMIT}). Using stale cache or skipping.")
             # Return stale cache if available
             if cache_key in self._cache:
                 return self._cache[cache_key]
             return None
 
         if not self.api_key:
+            logger.error("NO API KEY! Set TWELVEDATA_API_KEY in .env file")
             return None
 
         try:
@@ -162,7 +166,7 @@ class DataFetcher:
         Cost: 12 requests. Used for auto-scan.
         """
         symbols = Config.priority_symbols()
-        logger.info(f"📡 Priority scan: {len(symbols)} symbols on {timeframe} (budget: {self.remaining_budget})")
+        logger.info(f"Priority scan: {len(symbols)} symbols on {timeframe} (budget: {self.remaining_budget})")
         return await self._fetch_symbols(symbols, timeframe)
 
     async def fetch_full_scan(self, timeframe: str) -> Dict[str, Optional[pd.DataFrame]]:
@@ -171,7 +175,7 @@ class DataFetcher:
         Cost: ~35 requests. Used for manual /scan command.
         """
         symbols = Config.all_symbols()
-        logger.info(f"📡 Full scan: {len(symbols)} symbols on {timeframe} (budget: {self.remaining_budget})")
+        logger.info(f"Full scan: {len(symbols)} symbols on {timeframe} (budget: {self.remaining_budget})")
         return await self._fetch_symbols(symbols, timeframe)
 
     async def fetch_multi_timeframe(self, symbol: str) -> Dict[str, Optional[pd.DataFrame]]:
@@ -193,13 +197,13 @@ class DataFetcher:
         for sym in symbols:
             # Skip if no budget left
             if not self._can_make_request():
-                logger.warning(f"⚠️ Budget exhausted. Skipping remaining symbols.")
+                logger.warning(f"Budget exhausted. Skipping remaining symbols.")
                 break
 
             df = await self.fetch_ohlc(sym, timeframe)
             results[sym] = df
 
-        logger.info(f"📊 Fetched {len(results)} symbols. Budget remaining: {self.remaining_budget}")
+        logger.info(f"Fetched {len(results)} symbols. Budget remaining: {self.remaining_budget}")
         return results
 
     # Kept for backward compatibility with scanner
@@ -248,7 +252,7 @@ class DataFetcher:
                 if "code" in data and data["code"] != 200:
                     error_msg = data.get("message", "Unknown error")
                     if "limit" in error_msg.lower():
-                        logger.error(f"⚠️ RATE LIMIT HIT: {error_msg}")
+                        logger.error(f"RATE LIMIT HIT: {error_msg}")
                     else:
                         logger.error(f"API error for {symbol}: {error_msg}")
                     return None
@@ -281,7 +285,7 @@ class DataFetcher:
                 # TwelveData returns newest first, reverse
                 df = df.iloc[::-1].reset_index(drop=True)
 
-                logger.info(f"✓ {symbol} {timeframe} ({len(df)} candles) [req #{self._daily_count}]")
+                logger.info(f"{symbol} {timeframe} ({len(df)} candles) [req #{self._daily_count}]")
                 return df
 
         except aiohttp.ClientError as e:
@@ -317,9 +321,9 @@ class DataFetcher:
         """Get cache statistics."""
         cached = len(self._cache)
         return (
-            f"📦 Cache: {cached} items | "
-            f"📊 Today: {self._daily_count}/{DAILY_REQUEST_LIMIT} requests | "
-            f"💰 Remaining: {self.remaining_budget}"
+            f"Cache: {cached} items | "
+            f"Today: {self._daily_count}/{DAILY_REQUEST_LIMIT} requests | "
+            f"Remaining: {self.remaining_budget}"
         )
 
     # ─────────────────────────────────────────────
