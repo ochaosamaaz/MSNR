@@ -2,11 +2,15 @@
 Market Data Fetcher Module.
 
 Fetches OHLC data for:
-- Forex pairs (Major + Minor) via TwelveData API
-- Metals (XAUUSD) via TwelveData API
-- Crypto pairs via CCXT (OKX/Bybit/KuCoin - Binance blocked in some regions)
+- Forex pairs (Major + Minor) via TwelveData API (direct)
+- Metals (XAUUSD) via TwelveData API (direct)
+- Crypto pairs via CCXT (OKX/Bybit/KuCoin) with PROXY support
 
 Supports timeframes: M15, H1, H4
+
+Note: In Indonesia, ISP blocks ALL crypto exchange APIs.
+Set PROXY_URL in .env to route crypto requests through a proxy/VPN.
+Forex data via TwelveData works without proxy.
 """
 
 import asyncio
@@ -17,6 +21,11 @@ from typing import Dict, List, Optional
 import aiohttp
 import pandas as pd
 import numpy as np
+
+try:
+    from aiohttp_socks import ProxyConnector
+except ImportError:
+    ProxyConnector = None
 
 try:
     import ccxt.async_support as ccxt_async
@@ -34,11 +43,10 @@ TIMEFRAME_MAP = {
     "H4": {"ccxt": "4h", "seconds": 14400, "candles_needed": 300},
 }
 
-# Twelve Data free API
+# TwelveData API
 TWELVEDATA_BASE = "https://api.twelvedata.com"
 
-# Crypto exchanges to try (in order of priority)
-# Binance is blocked in Indonesia, so we use alternatives
+# Crypto exchanges to try (in priority order)
 CRYPTO_EXCHANGES = ["okx", "bybit", "kucoin", "binance"]
 
 
@@ -46,19 +54,28 @@ class DataFetcher:
     """
     Fetches market data from multiple sources.
 
-    - Crypto: CCXT (OKX → Bybit → KuCoin → Binance fallback)
-    - Forex/Metals: TwelveData API
+    - Crypto: CCXT with proxy (ISP blocks exchanges in Indonesia)
+    - Forex/Metals: TwelveData API (direct connection, not blocked)
     """
 
     def __init__(self):
         self.twelvedata_key = Config.TWELVEDATA_API_KEY if hasattr(Config, 'TWELVEDATA_API_KEY') else ""
+        self.proxy_url = Config.PROXY_URL if hasattr(Config, 'PROXY_URL') else ""
         self._cache: Dict[str, pd.DataFrame] = {}
         self._cache_expiry: Dict[str, datetime] = {}
         self._session: Optional[aiohttp.ClientSession] = None
-        self._working_exchange: Optional[str] = None  # Cache which exchange works
+        self._working_exchange: Optional[str] = None
+
+        if self.proxy_url:
+            logger.info(f"Proxy configured: {self.proxy_url}")
+        else:
+            logger.warning(
+                "No PROXY_URL set. Crypto data may fail if ISP blocks exchanges. "
+                "Set PROXY_URL in .env (e.g., http://127.0.0.1:7890 or socks5://127.0.0.1:1080)"
+            )
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
+        """Get or create aiohttp session (no proxy - for TwelveData)."""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30)
@@ -79,12 +96,11 @@ class DataFetcher:
     ) -> Optional[pd.DataFrame]:
         """
         Fetch OHLC data for a symbol and timeframe.
-
         Returns DataFrame with columns: open, high, low, close, volume, timestamp
         """
         cache_key = f"{symbol}_{timeframe}"
 
-        # Check cache (valid for 1 candle period)
+        # Check cache
         if self._is_cache_valid(cache_key, timeframe):
             return self._cache[cache_key]
 
@@ -120,7 +136,6 @@ class DataFetcher:
     ) -> Dict[str, Optional[pd.DataFrame]]:
         """Fetch data for multiple symbols on same timeframe."""
         results = {}
-        # Process in batches to avoid rate limits
         batch_size = 5
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
@@ -141,61 +156,73 @@ class DataFetcher:
         return results
 
     # ─────────────────────────────────────────────
-    # CRYPTO DATA (CCXT - OKX/Bybit/KuCoin/Binance)
+    # CRYPTO DATA (CCXT with Proxy)
     # ─────────────────────────────────────────────
 
     async def _fetch_crypto(
         self, symbol: str, timeframe: str, num_candles: int
     ) -> Optional[pd.DataFrame]:
         """
-        Fetch crypto data using CCXT.
-        Tries multiple exchanges: OKX → Bybit → KuCoin → Binance
-        Caches which exchange works to avoid retrying blocked ones.
+        Fetch crypto data using CCXT with proxy support.
+        Tries: OKX → Bybit → KuCoin → Binance
         """
         if ccxt_async is None:
-            logger.error("CCXT not installed. Cannot fetch crypto data.")
+            logger.error("CCXT not installed. Run: pip install ccxt")
             return None
 
         ccxt_tf = TIMEFRAME_MAP[timeframe]["ccxt"]
         ccxt_symbol = self._to_ccxt_symbol(symbol)
 
-        # If we already know which exchange works, try that first
+        # If we know which exchange works, try that first
         if self._working_exchange:
             df = await self._try_exchange(
                 self._working_exchange, ccxt_symbol, ccxt_tf, num_candles
             )
             if df is not None:
                 return df
-            # If it failed, reset and try others
             self._working_exchange = None
 
-        # Try each exchange in order
+        # Try each exchange
         for exchange_id in CRYPTO_EXCHANGES:
             logger.info(f"Trying {exchange_id} for {symbol}...")
             df = await self._try_exchange(exchange_id, ccxt_symbol, ccxt_tf, num_candles)
             if df is not None:
                 self._working_exchange = exchange_id
-                logger.info(f"✓ Using {exchange_id} for crypto data")
+                logger.info(f"✓ Connected via {exchange_id}")
                 return df
 
-        logger.error(f"All exchanges failed for {symbol}")
+        logger.error(
+            f"All exchanges failed for {symbol}. "
+            f"{'Set PROXY_URL in .env!' if not self.proxy_url else 'Check your proxy connection.'}"
+        )
         return None
 
     async def _try_exchange(
         self, exchange_id: str, ccxt_symbol: str, ccxt_tf: str, num_candles: int
     ) -> Optional[pd.DataFrame]:
-        """Try fetching from a specific exchange."""
+        """Try fetching from a specific exchange with proxy support."""
         exchange = None
         try:
             exchange_class = getattr(ccxt_async, exchange_id, None)
             if exchange_class is None:
                 return None
 
-            exchange = exchange_class({
+            # Configure exchange
+            config = {
                 "enableRateLimit": True,
-                "timeout": 15000,  # 15 second timeout
+                "timeout": 15000,
                 "options": {"defaultType": "spot"},
-            })
+            }
+
+            # Add proxy settings for blocked regions
+            if self.proxy_url:
+                if self.proxy_url.startswith("socks"):
+                    config["socksProxy"] = self.proxy_url
+                else:
+                    config["httpProxy"] = self.proxy_url
+                    config["httpsProxy"] = self.proxy_url
+
+            exchange = exchange_class(config)
 
             ohlcv = await exchange.fetch_ohlcv(
                 ccxt_symbol, ccxt_tf, limit=num_candles
@@ -224,7 +251,7 @@ class DataFetcher:
                 await exchange.close()
 
     # ─────────────────────────────────────────────
-    # FOREX / METALS DATA (TwelveData)
+    # FOREX / METALS DATA (TwelveData - Direct)
     # ─────────────────────────────────────────────
 
     async def _fetch_forex(
@@ -232,14 +259,14 @@ class DataFetcher:
     ) -> Optional[pd.DataFrame]:
         """
         Fetch Forex/Metals data via TwelveData API.
-        Free tier: 800 requests/day, 8 requests/minute.
+        Direct connection (not blocked by ISP).
         """
         if self.twelvedata_key:
             df = await self._fetch_twelvedata(symbol, timeframe, num_candles)
             if df is not None:
                 return df
 
-        logger.warning(f"No data source available for {symbol} {timeframe}")
+        logger.warning(f"No data for {symbol} {timeframe}. Set TWELVEDATA_API_KEY in .env")
         return None
 
     async def _fetch_twelvedata(
@@ -249,9 +276,7 @@ class DataFetcher:
         try:
             session = await self._get_session()
 
-            # Convert timeframe
             td_interval = self._to_twelvedata_interval(timeframe)
-            # Convert symbol format (EURUSD -> EUR/USD)
             td_symbol = self._to_twelvedata_symbol(symbol)
 
             params = {
@@ -272,9 +297,8 @@ class DataFetcher:
                 data = await resp.json()
 
                 if "values" not in data:
-                    # Check for error message
                     if "message" in data:
-                        logger.error(f"TwelveData error for {symbol}: {data['message']}")
+                        logger.error(f"TwelveData: {data['message']}")
                     return None
 
                 values = data["values"]
@@ -297,7 +321,7 @@ class DataFetcher:
                 else:
                     df["volume"] = 0.0
 
-                # TwelveData returns newest first, reverse it
+                # TwelveData returns newest first, reverse
                 df = df.iloc[::-1].reset_index(drop=True)
 
                 logger.info(f"✓ TwelveData: {symbol} {timeframe} ({len(df)} candles)")
@@ -319,7 +343,6 @@ class DataFetcher:
         if cache_key not in self._cache or cache_key not in self._cache_expiry:
             return False
 
-        # Cache valid for half a candle period
         seconds = TIMEFRAME_MAP[timeframe]["seconds"]
         expiry_seconds = seconds / 2
 
@@ -332,19 +355,17 @@ class DataFetcher:
         self._cache_expiry.clear()
 
     # ─────────────────────────────────────────────
-    # SYMBOL CONVERSION HELPERS
+    # SYMBOL CONVERSION
     # ─────────────────────────────────────────────
 
     def _to_ccxt_symbol(self, symbol: str) -> str:
-        """Convert symbol to CCXT format."""
-        # Crypto: BTCUSDT -> BTC/USDT
+        """Convert symbol to CCXT format (e.g., BTCUSDT -> BTC/USDT)."""
         if symbol.endswith("USDT"):
             base = symbol[:-4]
             return f"{base}/USDT"
         elif symbol.endswith("USD"):
             base = symbol[:-3]
             return f"{base}/USD"
-        # Forex: EURUSD -> EUR/USD
         return f"{symbol[:3]}/{symbol[3:]}"
 
     def _to_twelvedata_symbol(self, symbol: str) -> str:
@@ -353,16 +374,11 @@ class DataFetcher:
             return "XAU/USD"
         if symbol.endswith("USDT"):
             return f"{symbol[:-4]}/{symbol[-4:]}"
-        # Forex pairs
         return f"{symbol[:3]}/{symbol[3:]}"
 
     def _to_twelvedata_interval(self, timeframe: str) -> str:
         """Convert timeframe to TwelveData interval."""
-        mapping = {
-            "M15": "15min",
-            "H1": "1h",
-            "H4": "4h",
-        }
+        mapping = {"M15": "15min", "H1": "1h", "H4": "4h"}
         return mapping.get(timeframe, "1h")
 
     # ─────────────────────────────────────────────
@@ -370,7 +386,7 @@ class DataFetcher:
     # ─────────────────────────────────────────────
 
     def get_current_price(self, df: pd.DataFrame) -> float:
-        """Get the most recent close price from data."""
+        """Get the most recent close price."""
         if df is not None and len(df) > 0:
             return float(df.iloc[-1]["close"])
         return 0.0
