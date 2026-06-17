@@ -16,9 +16,6 @@ class Config:
     # Data Sources
     TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 
-    # Proxy (required in Indonesia - ISP blocks crypto exchanges)
-    PROXY_URL = os.getenv("PROXY_URL", "")  # e.g., http://127.0.0.1:7890
-
     # Scanning
     SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
 
