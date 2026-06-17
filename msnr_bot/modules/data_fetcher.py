@@ -2,9 +2,9 @@
 Market Data Fetcher Module.
 
 Fetches OHLC data for:
-- Forex pairs (Major + Minor) via free API
-- Metals (XAUUSD) via free API
-- Crypto pairs via CCXT (Binance)
+- Forex pairs (Major + Minor) via TwelveData API
+- Metals (XAUUSD) via TwelveData API
+- Crypto pairs via CCXT (OKX/Bybit/KuCoin - Binance blocked in some regions)
 
 Supports timeframes: M15, H1, H4
 """
@@ -34,16 +34,20 @@ TIMEFRAME_MAP = {
     "H4": {"ccxt": "4h", "seconds": 14400, "candles_needed": 300},
 }
 
-# Twelve Data free API (alternative: Alpha Vantage, Forex API)
+# Twelve Data free API
 TWELVEDATA_BASE = "https://api.twelvedata.com"
+
+# Crypto exchanges to try (in order of priority)
+# Binance is blocked in Indonesia, so we use alternatives
+CRYPTO_EXCHANGES = ["okx", "bybit", "kucoin", "binance"]
 
 
 class DataFetcher:
     """
     Fetches market data from multiple sources.
 
-    - Crypto: CCXT (Binance) - free, no API key needed for public data
-    - Forex/Metals: TwelveData API or fallback to synthetic/cached data
+    - Crypto: CCXT (OKX → Bybit → KuCoin → Binance fallback)
+    - Forex/Metals: TwelveData API
     """
 
     def __init__(self):
@@ -51,6 +55,7 @@ class DataFetcher:
         self._cache: Dict[str, pd.DataFrame] = {}
         self._cache_expiry: Dict[str, datetime] = {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._working_exchange: Optional[str] = None  # Cache which exchange works
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -136,25 +141,61 @@ class DataFetcher:
         return results
 
     # ─────────────────────────────────────────────
-    # CRYPTO DATA (CCXT - Binance)
+    # CRYPTO DATA (CCXT - OKX/Bybit/KuCoin/Binance)
     # ─────────────────────────────────────────────
 
     async def _fetch_crypto(
         self, symbol: str, timeframe: str, num_candles: int
     ) -> Optional[pd.DataFrame]:
-        """Fetch crypto data using CCXT (Binance)."""
+        """
+        Fetch crypto data using CCXT.
+        Tries multiple exchanges: OKX → Bybit → KuCoin → Binance
+        Caches which exchange works to avoid retrying blocked ones.
+        """
         if ccxt_async is None:
             logger.error("CCXT not installed. Cannot fetch crypto data.")
             return None
 
-        exchange = ccxt_async.binance({
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-        })
+        ccxt_tf = TIMEFRAME_MAP[timeframe]["ccxt"]
+        ccxt_symbol = self._to_ccxt_symbol(symbol)
 
+        # If we already know which exchange works, try that first
+        if self._working_exchange:
+            df = await self._try_exchange(
+                self._working_exchange, ccxt_symbol, ccxt_tf, num_candles
+            )
+            if df is not None:
+                return df
+            # If it failed, reset and try others
+            self._working_exchange = None
+
+        # Try each exchange in order
+        for exchange_id in CRYPTO_EXCHANGES:
+            logger.info(f"Trying {exchange_id} for {symbol}...")
+            df = await self._try_exchange(exchange_id, ccxt_symbol, ccxt_tf, num_candles)
+            if df is not None:
+                self._working_exchange = exchange_id
+                logger.info(f"✓ Using {exchange_id} for crypto data")
+                return df
+
+        logger.error(f"All exchanges failed for {symbol}")
+        return None
+
+    async def _try_exchange(
+        self, exchange_id: str, ccxt_symbol: str, ccxt_tf: str, num_candles: int
+    ) -> Optional[pd.DataFrame]:
+        """Try fetching from a specific exchange."""
+        exchange = None
         try:
-            ccxt_tf = TIMEFRAME_MAP[timeframe]["ccxt"]
-            ccxt_symbol = self._to_ccxt_symbol(symbol)
+            exchange_class = getattr(ccxt_async, exchange_id, None)
+            if exchange_class is None:
+                return None
+
+            exchange = exchange_class({
+                "enableRateLimit": True,
+                "timeout": 15000,  # 15 second timeout
+                "options": {"defaultType": "spot"},
+            })
 
             ohlcv = await exchange.fetch_ohlcv(
                 ccxt_symbol, ccxt_tf, limit=num_candles
@@ -176,36 +217,28 @@ class DataFetcher:
             return df
 
         except Exception as e:
-            logger.error(f"CCXT error for {symbol}: {e}")
+            logger.debug(f"{exchange_id} failed for {ccxt_symbol}: {e}")
             return None
         finally:
-            await exchange.close()
+            if exchange:
+                await exchange.close()
 
     # ─────────────────────────────────────────────
-    # FOREX / METALS DATA
+    # FOREX / METALS DATA (TwelveData)
     # ─────────────────────────────────────────────
 
     async def _fetch_forex(
         self, symbol: str, timeframe: str, num_candles: int
     ) -> Optional[pd.DataFrame]:
         """
-        Fetch Forex/Metals data.
-
-        Primary: TwelveData API (free tier: 800 req/day)
-        Fallback: Generate from available sources
+        Fetch Forex/Metals data via TwelveData API.
+        Free tier: 800 requests/day, 8 requests/minute.
         """
-        # Try TwelveData first
         if self.twelvedata_key:
             df = await self._fetch_twelvedata(symbol, timeframe, num_candles)
             if df is not None:
                 return df
 
-        # Fallback: Try fetching from a free forex API
-        df = await self._fetch_free_forex_api(symbol, timeframe, num_candles)
-        if df is not None:
-            return df
-
-        # Last resort: Try CCXT with forex-like crypto pairs or return None
         logger.warning(f"No data source available for {symbol} {timeframe}")
         return None
 
@@ -233,11 +266,15 @@ class DataFetcher:
                 f"{TWELVEDATA_BASE}/time_series", params=params
             ) as resp:
                 if resp.status != 200:
+                    logger.error(f"TwelveData HTTP {resp.status} for {symbol}")
                     return None
 
                 data = await resp.json()
 
                 if "values" not in data:
+                    # Check for error message
+                    if "message" in data:
+                        logger.error(f"TwelveData error for {symbol}: {data['message']}")
                     return None
 
                 values = data["values"]
@@ -262,83 +299,16 @@ class DataFetcher:
 
                 # TwelveData returns newest first, reverse it
                 df = df.iloc[::-1].reset_index(drop=True)
+
+                logger.info(f"✓ TwelveData: {symbol} {timeframe} ({len(df)} candles)")
                 return df
 
+        except aiohttp.ClientError as e:
+            logger.error(f"TwelveData connection error for {symbol}: {e}")
+            return None
         except Exception as e:
             logger.error(f"TwelveData error for {symbol}: {e}")
             return None
-
-    async def _fetch_free_forex_api(
-        self, symbol: str, timeframe: str, num_candles: int
-    ) -> Optional[pd.DataFrame]:
-        """
-        Fetch from free Forex API alternatives.
-        Uses Yahoo Finance via yfinance-style endpoint or other free sources.
-        """
-        try:
-            session = await self._get_session()
-
-            # Use a free forex data endpoint
-            # Format symbol for the API
-            pair = f"{symbol[:3]}/{symbol[3:]}" if len(symbol) == 6 else symbol
-
-            # Try using CCXT with a forex-supporting exchange
-            if ccxt_async is not None:
-                return await self._fetch_forex_via_ccxt(symbol, timeframe, num_candles)
-
-        except Exception as e:
-            logger.error(f"Free forex API error for {symbol}: {e}")
-
-        return None
-
-    async def _fetch_forex_via_ccxt(
-        self, symbol: str, timeframe: str, num_candles: int
-    ) -> Optional[pd.DataFrame]:
-        """
-        Attempt to fetch forex data through CCXT exchanges that support forex.
-        """
-        # Try exchanges that might have forex data
-        exchanges_to_try = ["currencycom"]
-
-        for exchange_id in exchanges_to_try:
-            try:
-                exchange_class = getattr(ccxt_async, exchange_id, None)
-                if exchange_class is None:
-                    continue
-
-                exchange = exchange_class({"enableRateLimit": True})
-
-                ccxt_tf = TIMEFRAME_MAP[timeframe]["ccxt"]
-                # Format: EUR/USD for forex
-                ccxt_symbol = f"{symbol[:3]}/{symbol[3:]}"
-
-                await exchange.load_markets()
-                if ccxt_symbol not in exchange.markets:
-                    await exchange.close()
-                    continue
-
-                ohlcv = await exchange.fetch_ohlcv(
-                    ccxt_symbol, ccxt_tf, limit=num_candles
-                )
-                await exchange.close()
-
-                if ohlcv:
-                    df = pd.DataFrame(
-                        ohlcv,
-                        columns=["timestamp", "open", "high", "low", "close", "volume"]
-                    )
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                    df = df.astype({
-                        "open": float, "high": float, "low": float,
-                        "close": float, "volume": float
-                    })
-                    return df
-
-            except Exception as e:
-                logger.debug(f"CCXT {exchange_id} failed for {symbol}: {e}")
-                continue
-
-        return None
 
     # ─────────────────────────────────────────────
     # CACHE MANAGEMENT
