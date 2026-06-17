@@ -17,7 +17,7 @@ class Config:
     TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 
     # Scanning
-    SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
+    SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
 
     # Zone Configuration
     ZONE_BUFFER_ATR_MULTIPLIER = float(os.getenv("ZONE_BUFFER_ATR_MULTIPLIER", "0.1"))
@@ -55,29 +55,37 @@ class Config:
     # Timeframes
     TIMEFRAMES = ["M15", "H1", "H4"]
 
-    # Symbols
+    # Symbols — PRIORITY TIER (scanned first, lower tiers only on /scan full)
+    # Tier 1: High priority (always scanned) — 12 symbols
     FOREX_MAJORS = [
         "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"
     ]
 
-    FOREX_MINORS = [
-        "EURGBP", "EURJPY", "EURCHF", "EURAUD", "EURCAD", "EURNZD",
-        "GBPJPY", "GBPCHF", "GBPAUD", "GBPCAD", "GBPNZD",
-        "AUDJPY", "AUDCHF", "AUDCAD", "AUDNZD",
-        "NZDJPY", "NZDCHF", "NZDCAD",
-        "CADJPY", "CADCHF", "CHFJPY"
-    ]
-
     METALS = ["XAUUSD"]
 
-    CRYPTO = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT",
-        "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT"
+    CRYPTO_PRIORITY = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT"]
+
+    # Tier 2: Secondary (scanned when quota allows) — 17 symbols
+    FOREX_MINORS = [
+        "EURGBP", "EURJPY", "GBPJPY", "EURAUD",
+        "GBPAUD", "AUDJPY", "EURCHF", "CADJPY",
+        "NZDJPY", "EURCAD", "GBPCAD", "EURNZD",
+        "GBPNZD", "AUDCAD", "AUDNZD", "GBPCHF", "CHFJPY"
     ]
+
+    CRYPTO_SECONDARY = ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT"]
+
+    # Combined lists
+    CRYPTO = CRYPTO_PRIORITY + CRYPTO_SECONDARY
+
+    @classmethod
+    def priority_symbols(cls):
+        """Tier 1 symbols — always scanned (12 symbols × 3 TF = 36 requests)."""
+        return cls.FOREX_MAJORS + cls.METALS + cls.CRYPTO_PRIORITY
 
     @classmethod
     def all_symbols(cls):
-        """Return all tradeable symbols."""
+        """All symbols including Tier 2 (35 symbols × 3 TF = 105 requests)."""
         return cls.FOREX_MAJORS + cls.FOREX_MINORS + cls.METALS + cls.CRYPTO
 
     @classmethod

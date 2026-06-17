@@ -59,6 +59,7 @@ class MSNRBot:
         self._app.add_handler(CommandHandler("watchlist", self._cmd_watchlist))
         self._app.add_handler(CommandHandler("pair", self._cmd_pair))
         self._app.add_handler(CommandHandler("alerts", self._cmd_alerts))
+        self._app.add_handler(CommandHandler("budget", self._cmd_budget))
 
         return self._app
 
@@ -207,6 +208,31 @@ class MSNRBot:
         await update.message.reply_text(
             f"🔔 Alerts: {status}\n\n"
             f"{'Automatic alerts will be sent for new high-quality setups.' if self.alerts_enabled else 'No automatic alerts will be sent.'}"
+        )
+
+    async def _cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /budget command - show API usage stats."""
+        stats = self.scanner.data_fetcher.get_cache_stats()
+        remaining = self.scanner.data_fetcher.remaining_budget
+        total = 780
+
+        # Visual budget bar
+        used_pct = ((total - remaining) / total) * 100
+        bar_len = 20
+        filled = int(bar_len * used_pct / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+
+        await update.message.reply_text(
+            f"💰 API BUDGET STATUS\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{stats}\n\n"
+            f"Usage: [{bar}] {used_pct:.0f}%\n\n"
+            f"📋 Cost per action:\n"
+            f"  /scan = ~12 requests\n"
+            f"  /pair = 3 requests\n"
+            f"  Auto-alert = ~12 requests\n\n"
+            f"💡 Cache saves requests!\n"
+            f"H4 data cached 4 hours, H1 cached 1 hour."
         )
 
     # ─────────────────────────────────────────────

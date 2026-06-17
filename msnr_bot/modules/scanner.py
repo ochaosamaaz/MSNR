@@ -56,6 +56,8 @@ class ScanResult:
             f"👀 Watchlist (A/A+): {len(self.watchlist_setups)}\n"
             f"🟢 Fresh Zones: {len(self.fresh_zones)}\n"
             f"🟡 Non-Fresh Zones: {len(self.non_fresh_zones)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 Tip: Use /pair SYMBOL for detailed analysis"
         )
 
 
@@ -74,8 +76,53 @@ class MarketScanner:
 
     async def scan_all(self) -> ScanResult:
         """
-        Scan all configured symbols across all timeframes.
-        Returns comprehensive scan results.
+        Smart scan — uses priority symbols on H1 to save API budget.
+        Full scan (all symbols × all timeframes) only when explicitly requested.
+        Cost: ~12 requests (priority) vs 105 requests (full).
+        """
+        result = ScanResult()
+        symbols = Config.priority_symbols()
+
+        logger.info(
+            f"Starting priority scan: {len(symbols)} symbols | "
+            f"Budget: {self.data_fetcher.remaining_budget} requests remaining"
+        )
+
+        # Scan H1 first (best balance of signal quality vs API cost)
+        timeframe = "H1"
+        data_batch = await self.data_fetcher.fetch_batch(symbols, timeframe)
+
+        for symbol, df in data_batch.items():
+            if df is None or len(df) < 50:
+                continue
+
+            try:
+                setups, zones = await self._analyze_symbol(
+                    symbol, timeframe, df, data_batch
+                )
+                result.all_setups.extend(setups)
+                result.all_zones.extend(zones)
+                result.symbols_scanned += 1
+            except Exception as e:
+                error_msg = f"Error analyzing {symbol} {timeframe}: {e}"
+                logger.error(error_msg)
+                result.errors.append(error_msg)
+
+        # Categorize results
+        self._categorize_results(result)
+        result.scan_time = datetime.utcnow()
+        self._last_scan_result = result
+
+        logger.info(
+            f"Scan complete: {len(result.valid_setups)} valid setups | "
+            f"{self.data_fetcher.get_cache_stats()}"
+        )
+        return result
+
+    async def scan_full(self) -> ScanResult:
+        """
+        Full scan — ALL symbols × ALL timeframes.
+        Expensive: ~105 requests. Only use when user explicitly wants full scan.
         """
         result = ScanResult()
         all_symbols = Config.all_symbols()
@@ -150,6 +197,13 @@ class MarketScanner:
                 result.errors.append(error_msg)
 
         # Categorize
+        self._categorize_results(result)
+
+        result.scan_time = datetime.utcnow()
+        return result
+
+    def _categorize_results(self, result: ScanResult):
+        """Categorize scan results into setup types and zone types."""
         result.valid_setups = self.trade_calculator.filter_valid_setups(result.all_setups)
         result.sniper_setups = self.trade_calculator.get_sniper_setups(result.all_setups)
         result.high_probability_setups = self.trade_calculator.get_high_probability_setups(
@@ -164,9 +218,6 @@ class MarketScanner:
             z for z in result.all_zones
             if z.classification == ZoneClassification.NON_FRESH
         ]
-
-        result.scan_time = datetime.utcnow()
-        return result
 
     async def _analyze_symbol(
         self, symbol: str, timeframe: str,
